@@ -244,24 +244,36 @@ def otp_visible(page):
 
 
 def live_test(args, server, output, report):
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import sync_playwright, TimeoutError as BrowserTimeout
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=False)
         try:
             page = browser.new_page(locale='vi-VN', viewport={'width': 1280, 'height': 850})
-            page.goto('https://shopee.vn/buyer/signup', wait_until='domcontentloaded', timeout=60000)
+            report['stage'] = 'open_signup'
+            try:
+                page.goto('https://shopee.vn/buyer/signup', wait_until='commit', timeout=60000)
+            except BrowserTimeout:
+                # A slow subresource must not block an already visible signup form.
+                if page.get_by_placeholder(re.compile(r'Số điện thoại|Phone number', re.I)).count() == 0:
+                    raise
             phone_input = page.get_by_placeholder(re.compile(r'Số điện thoại|Phone number', re.I)).first
-            phone_input.wait_for(state='visible', timeout=30000)
+            report['stage'] = 'find_phone_input'
+            phone_input.wait_for(state='visible', timeout=60000)
             print('Nhập số trong hộp thoại trên máy để bắt đầu.', flush=True)
+            report['stage'] = 'await_phone_input'
             phone = phone_number()
             try:
+                report['stage'] = 'fill_phone'
                 phone_input.fill(phone)
-                page.get_by_role('button', name=re.compile(r'^(Tiếp theo|Đăng ký|Next|Sign up)$', re.I)).first.click(timeout=15000)
+                phone_input.press('Tab')
+                report['stage'] = 'click_next'
+                page.get_by_role('button', name=re.compile(r'^(Tiếp theo|Next)$', re.I)).first.click(timeout=15000)
             finally:
                 phone = None
             print('Đã bấm Tiếp theo. Đang chờ CAPTCHA...', flush=True)
             report['signup_submitted'] = True
+            report['stage'] = 'wait_captcha'
             deadline = time.monotonic() + args.timeout
             captured = None
             while time.monotonic() < deadline:
@@ -275,10 +287,12 @@ def live_test(args, server, output, report):
             if not captured:
                 raise TimeoutError('Không thấy CAPTCHA trong thời gian chờ. Có thể trang báo lỗi hoặc đổi giao diện.')
             frame, image, _ = captured
+            report['stage'] = 'read_captcha_image'
             raw, dimensions = read_image(page, image)
             (output / 'captcha-image.bin').write_bytes(raw)
             image.screenshot(path=str(output / 'captcha.png'))
             encoded = 'data:image/png;base64,' + base64.b64encode(raw).decode()
+            report['stage'] = 'detect'
             result = server.detect(encoded)
             report['detection'] = result
             report['image_sha256'] = hashlib.sha256(raw).hexdigest()
@@ -286,6 +300,7 @@ def live_test(args, server, output, report):
             print(f'Server: source={result.get("source")}; points={result["points"]}', flush=True)
             if len(result['points']) != 1:
                 raise RuntimeError(f'Server trả {len(result["points"])} điểm; chưa xác định được một vị trí kéo duy nhất.')
+            report['stage'] = 'drag'
             report['drag'] = drag_to_point(page, frame, image, result['points'][0], dimensions, args.handle_selector)
             page.wait_for_timeout(700)
             if args.verify_selector:
@@ -298,6 +313,7 @@ def live_test(args, server, output, report):
                         if buttons.count() and buttons.first.is_visible():
                             verify = buttons.first
                             break
+            report['stage'] = 'verify'
             if verify is not None:
                 verify.click(timeout=5000)
             deadline = time.monotonic() + 20
@@ -381,12 +397,9 @@ def main():
     except KeyboardInterrupt:
         report.update(status='cancelled', error='Đã dừng bằng Ctrl+C.')
     except Exception as exc:
-        # Avoid serializing browser errors containing typed form values.
+        # Playwright call logs can include fill() values; redact phone digits.
         report.update(status='failed', error_type=type(exc).__name__)
-        if isinstance(exc, (RuntimeError, TimeoutError, InterruptedError, OSError)):
-            report['error'] = re.sub(r'(?<!\d)0\d{9}(?!\d)', '[phone]', str(exc))
-        else:
-            report['error'] = 'Lỗi thao tác trình duyệt; kiểm tra selector, kết nối và browser đã cài.'
+        report['error'] = re.sub(r'\d{6,}', '[redacted]', str(exc))[:3000]
     finally:
         (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
         print(json.dumps(report, ensure_ascii=False, indent=2))
