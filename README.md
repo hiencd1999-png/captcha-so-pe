@@ -54,17 +54,9 @@ tên dạng `left_top.png`, chạy trên cổng `5000`. Extension trong
 URL server của extension nằm trong `content.js`, quyền truy cập nằm trong
 `manifest.json` và cần khớp với địa chỉ server sử dụng.
 
-## Chạy thử bằng một file Python
+## Chẩn đoán khởi động và kết nối
 
-`test_shopee.py` khởi động server Python tại `http://127.0.0.1:10000`, chờ
-`/health` thành công rồi nạp `server1/extension` vào profile Chromium riêng.
-Trang kiểm tra kết nối hiển thị trạng thái extension, server và model. Chỉ
-sau khi extension gọi được server, script mới mở trang đăng ký Shopee.
-
-Script hỏi số điện thoại bằng hộp thoại trên máy, điền form và bấm Tiếp theo
-một lần. Extension gửi ảnh CAPTCHA gốc đến `/detect`; Python quy đổi tọa độ
-và thực hiện kéo chuột. Script kiểm tra bước OTP, không nhập OTP hoặc hoàn
-tất tài khoản. Nhãn xanh ở góc trang cho biết extension đã nối server.
+Chạy từ thư mục gốc dự án:
 
 ```powershell
 python -m pip install -r server1/requirements.txt playwright
@@ -72,47 +64,76 @@ python -m playwright install chromium
 python test_shopee.py
 ```
 
-Mặc định trình duyệt và server được giữ mở cả khi test kết thúc hoặc báo lỗi
-để quan sát. Đóng cửa sổ trình duyệt test để dừng server do script khởi động.
-Dùng `--close-after-test` nếu muốn tự đóng ngay. Nếu có server1 đã chạy trên
-cổng 10000, script xác minh và sử dụng lại; không dừng server đó khi kết thúc.
+Lệnh mặc định mở bảng chẩn đoán **local**, khởi động server1, xác minh
+`/health`, nạp extension vào profile Chromium riêng và kiểm tra content
+script trên `/diagnostics`. Trang hiển thị riêng trạng thái server, model
+và extension. Chế độ này không gửi đăng ký và không chạy nhận diện ảnh trên
+trang. Tùy chọn `--setup-only` tương đương chế độ mặc định.
 
-Chỉ bật server, nạp extension và mở Shopee, không tự gửi đăng ký:
+Trình duyệt và server được giữ mở để quan sát. Đóng cửa sổ chẩn đoán để dừng
+server do script mở; server có sẵn được giữ nguyên. Dùng `--close-after-test`
+để tự đóng sau khi kiểm tra.
+
+Mặc định dùng cổng 10000. Khi cổng này bị dịch vụ khác chiếm, thông báo lỗi
+nêu rõ nguyên nhân và gợi ý `--port 0`. Nếu đó là server1 phiên bản cũ, script
+mở phiên bản mới trên cổng trống. Có thể kết nối server local đã chạy bằng
+`--server-url http://127.0.0.1:10000`.
+
+`report.json` được cập nhật sau từng giai đoạn, không phải chờ test kết thúc.
+Lỗi có `error_code`, `error`, `hint` và chi tiết liên quan. Các lỗi chính:
+
+- `missing_dependencies`: thiếu thư viện Python.
+- `port_in_use` / `wrong_service`: cổng đang bận hoặc sai dịch vụ.
+- `server_exited` / `server_timeout`: server dừng hoặc quá thời gian chờ.
+- `health_invalid_json`: địa chỉ server không trả dữ liệu JSON hợp lệ.
+- `missing_browser`: thiếu Chromium cho Playwright.
+- `extension_connection_failed`: extension chưa nối được API server.
+
+Dùng `--startup-timeout 30` để thay đổi thời gian chờ khởi động.
+
+## Kiểm thử trên ảnh và trang mẫu local
+
+Chạy YOLO trực tiếp trên một ảnh; chế độ này không mở server, trình duyệt
+hoặc tra CSV/GitHub:
 
 ```powershell
-python test_shopee.py --setup-only
+python test_shopee.py --image server1/data/dataset/images/00ae58ca21c85376f499699f6c3fb816.png
 ```
 
-Nếu có `.venv` tại gốc dự án, script tự chạy lại bằng Python trong môi trường
-đó. Test API bằng ảnh local, không cần số điện thoại hoặc gửi đăng ký:
+Kiểm tra tối đa 12 ảnh trong thư mục:
 
 ```powershell
-python test_shopee.py --smoke
+python test_shopee.py --images-dir server1/data/dataset/images --limit 12
 ```
 
-Kiểm tra extension thật đã nạp, content script, service worker, API `/detect`
-và kéo chuột trên hai trang mẫu (ảnh gốc và ảnh thu nhỏ trong iframe):
+Có thể chỉ định `--model đường_dẫn_model.pt` và `--conf 0.8`. Model phải có
+sẵn trên máy. Báo cáo ghi từng khung nhận diện, lớp và độ tin cậy, kèm ảnh
+được vẽ khung. `no_detections` nghĩa là model không tìm thấy vùng ở ngưỡng
+đang dùng, không phải lỗi kết nối. Dự đoán chưa được coi là nhãn chuẩn.
+
+Kiểm tra API bằng ảnh local:
 
 ```powershell
-python test_shopee.py --integration-smoke
+python test_shopee.py --smoke --port 0
 ```
 
-Chế độ này chặn yêu cầu đến URL trang mẫu và trả HTML local, không gửi đăng
-ký lên Shopee. Nó xác minh kết nối extension/server và thao tác kéo trên mẫu,
-chưa xác minh giải được CAPTCHA của Shopee thật.
+Kiểm tra extension thật, API và thao tác kéo trên hai trang mẫu do test phục
+vụ tại địa chỉ local (ảnh gốc và ảnh thu nhỏ trong iframe):
 
-Ảnh CAPTCHA, log server và `report.json` nằm trong `test-results/` và được
-loại khỏi Git, cùng profile trình duyệt và bản extension được cấu hình cho
-lần chạy. Báo cáo không lưu số điện thoại. Dùng `--port 0` để tự chọn cổng
-trống; extension được cấu hình theo đúng cổng đó. Có thể dùng
-`--server-url http://127.0.0.1:10000` để kiểm tra server đã chạy.
+```powershell
+python test_shopee.py --integration-smoke --port 0
+```
 
-`server_smoke_passed` chỉ xác nhận API tra CSV và suy luận YOLO hoạt động.
-`extension_integration_passed` xác nhận extension và thao tác kéo qua hai
-trang mẫu local. `environment_ready` xác nhận môi trường trình duyệt/server
-đã mở ở chế độ `--setup-only`.
-`captcha_passed_otp_visible` xác nhận đã nhìn thấy bước OTP sau lần thử kéo;
-`captcha_disappeared_unconfirmed` chưa đủ để kết luận vượt CAPTCHA. Shopee có
-thể đổi giao diện hoặc hiện loại CAPTCHA khác; khi đó cần chỉ định
-`--background-selector`, `--handle-selector`, `--verify-selector` theo giao
-diện thực tế. Chạy `python test_shopee.py --help` để xem các tùy chọn.
+`server_smoke_passed` xác nhận API chạy được; `extension_integration_passed`
+xác nhận cả luồng trang mẫu. Các trạng thái này không đánh giá độ chính xác
+của model trên CAPTCHA bên ngoài.
+
+Ảnh kết quả, log server, báo cáo, profile trình duyệt và cấu hình extension
+theo từng lần chạy nằm trong `test-results/`, được loại khỏi Git. Nếu có
+`.venv` trong dự án, entry point tự sử dụng môi trường đó.
+
+Kiểm tra hồi quy cho các lỗi khởi động và báo cáo:
+
+```powershell
+.venv/Scripts/python.exe -m unittest discover -s tests -v
+```

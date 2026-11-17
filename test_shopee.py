@@ -1,9 +1,8 @@
-r"""Run one signup/CAPTCHA test; stop when Shopee shows the OTP step.
+r"""Local server/extension diagnostics and YOLO image tests.
 
-    .venv\Scripts\python.exe test_shopee.py
-    .venv\Scripts\python.exe test_shopee.py --smoke
-
-The phone number is requested locally and is never included in the report.
+    python test_shopee.py
+    python test_shopee.py --integration-smoke --port 0
+    python test_shopee.py --image path/to/image.png
 """
 
 import argparse
@@ -21,101 +20,113 @@ import socket
 import subprocess
 import sys
 import time
-import unicodedata
-from datetime import datetime
-from urllib.parse import unquote_to_bytes
-
+from datetime import datetime, timezone, timedelta
+from urllib.parse import unquote_to_bytes, urlsplit
 
 ROOT = Path(__file__).resolve().parent
+LOCAL_TZ = timezone(timedelta(hours=7))
 CAPTCHA_ROOT = '.shopee-captcha, .shopee-captcha-slider__main, .er1GfA, [class*="captcha" i]'
 BACKGROUND = ', '.join(f'{selector} img' for selector in CAPTCHA_ROOT.split(', '))
-HANDLE = (
-    '.shopee-captcha-slider__button, .shopee-captcha-slider__btn, '
-    '[class*="slider" i][class*="button" i], [role="slider"], img.j5BVKH'
-)
+HANDLE = '.shopee-captcha-slider__button, .shopee-captcha-slider__btn, [class*="slider" i][class*="button" i], [role="slider"], img.j5BVKH'
 
 
-def phone_number():
-    import tkinter as tk
-    from tkinter import simpledialog, messagebox
+class DiagnosticError(RuntimeError):
+    def __init__(self, code, message, hint='', **details):
+        super().__init__(message)
+        self.code, self.hint, self.details = code, hint, details
 
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes('-topmost', True)
-    try:
-        while True:
-            value = simpledialog.askstring(
-                'Test Shopee',
-                'Nhập số điện thoại của bạn để thử đăng ký Shopee.\n'
-                'Script bấm Tiếp theo, thử CAPTCHA một lần và dừng ở bước OTP.\n'
-                'Số điện thoại không được lưu vào báo cáo.', parent=root,
-            )
-            if value is None:
-                raise InterruptedError('Đã hủy nhập số điện thoại.')
-            value = re.sub(r'[\s().-]', '', value)
-            if value.startswith('+84'):
-                value = '0' + value[3:]
-            if re.fullmatch(r'0[35789]\d{8}', value):
-                return value
-            messagebox.showerror('Số chưa hợp lệ', 'Nhập số di động Việt Nam gồm 10 chữ số.', parent=root)
-    finally:
-        root.destroy()
+
+class RunReport(dict):
+    def __init__(self, output, mode):
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        super().__init__(mode=mode, status='starting', events=[])
+        self.output = output
+        self.stage('initializing', 'Khởi tạo chẩn đoán local.')
+
+    def stage(self, stage, message, **details):
+        self['stage'] = stage
+        self['updated_at'] = datetime.now(LOCAL_TZ).isoformat(timespec='seconds')
+        self['events'].append({'at': self['updated_at'], 'stage': stage, 'message': message, **details})
+        save_report(self.output, self)
+        print(f'[{stage}] {message}', flush=True)
 
 
 class Server:
-    def __init__(self, args, output):
-        self.args, self.output = args, output
+    def __init__(self, args, output, report):
+        self.args, self.output, self.report = args, output, report
         self.process = self.log = None
         self.url = args.server_url.rstrip('/') if args.server_url else ''
+        self.health = None
+
+    def probe(self, url, timeout=2):
+        import requests
+
+        response = requests.get(url + '/health', timeout=timeout)
+        if not response.ok:
+            raise DiagnosticError('health_http_error', f'/health trả HTTP {response.status_code}.', server_url=url)
+        try:
+            health = response.json()
+        except ValueError as error:
+            raise DiagnosticError('health_invalid_json', '/health không trả JSON.', 'Kiểm tra đúng cổng của server1.') from error
+        if not isinstance(health, dict) or health.get('service') != 'captcha-so-pe-server1' or health.get('ok') is not True:
+            raise DiagnosticError('wrong_service', 'Dịch vụ ở địa chỉ này không phải server1 hợp lệ.', 'Kiểm tra --server-url hoặc dùng --port 0.')
+        return health
 
     def __enter__(self):
         import requests
 
-        if not self.url:
-            with socket.socket() as sock:
-                try:
-                    sock.bind(('127.0.0.1', self.args.port))
-                    port = sock.getsockname()[1]
-                except OSError:
-                    if not self.args.port:
-                        raise
-                    candidate = f'http://127.0.0.1:{self.args.port}'
-                    try:
-                        response = requests.get(candidate + '/health', timeout=3)
-                        response.raise_for_status()
-                        if response.json().get('service') != 'captcha-so-pe-server1':
-                            raise RuntimeError('Dịch vụ trên cổng đang dùng không phải server1.')
-                    except (requests.RequestException, ValueError) as exc:
-                        raise RuntimeError(f'Cổng {self.args.port} đang bận; dùng --port 0 để chọn cổng trống.') from exc
-                    self.url = candidate
-                    print(f'Dùng server1 đang chạy: {self.url}', flush=True)
-            if not self.url:
-                self.url = f'http://127.0.0.1:{port}'
-                env = dict(os.environ, HOST='127.0.0.1', PORT=str(port), PYTHONUNBUFFERED='1', PYTHONIOENCODING='utf-8')
-                self.log = (self.output / 'server.log').open('w', encoding='utf-8')
-                self.process = subprocess.Popen(
-                    [sys.executable, str(ROOT / 'server1/server.py')], cwd=ROOT,
-                    env=env, stdout=self.log, stderr=subprocess.STDOUT,
-                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
-                )
-                print(f'Đã khởi động server1: PID={self.process.pid}; log={self.output / "server.log"}', flush=True)
+        self.report.stage('server_starting', 'Kiểm tra cổng và khởi động server.')
         try:
-            deadline = time.monotonic() + 90
+            if not self.url:
+                with socket.socket() as sock:
+                    try:
+                        sock.bind(('127.0.0.1', self.args.port))
+                    except OSError as error:
+                        candidate = f'http://127.0.0.1:{self.args.port}'
+                        try:
+                            existing = self.probe(candidate)
+                        except (requests.RequestException, DiagnosticError) as cause:
+                            raise DiagnosticError('port_in_use', f'Cổng {self.args.port} đang được dịch vụ khác sử dụng.', 'Chạy lại với --port 0 để chọn cổng trống.') from cause
+                        if existing.get('diagnostics_version', 0) >= 2:
+                            self.url = candidate
+                        else:
+                            sock.bind(('127.0.0.1', 0))
+                            print('Server cũ đang chiếm cổng; mở bản chẩn đoán mới trên cổng trống.', flush=True)
+                    port = self.args.port if self.url else sock.getsockname()[1]
+                if not self.url:
+                    self.url = f'http://127.0.0.1:{port}'
+                    env = dict(os.environ, HOST='127.0.0.1', PORT=str(port), PYTHONUNBUFFERED='1', PYTHONIOENCODING='utf-8')
+                    self.log = (self.output / 'server.log').open('w', encoding='utf-8')
+                    self.process = subprocess.Popen(
+                        [sys.executable, str(ROOT / 'server1/server.py')], cwd=ROOT,
+                        env=env, stdout=self.log, stderr=subprocess.STDOUT,
+                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                    )
+            self.report['server'] = {'url': self.url, 'managed': self.process is not None, 'pid': self.process.pid if self.process else None, 'active': False}
+            self.report.stage('server_waiting', f'Đang chờ {self.url}/health', **self.report['server'])
+            deadline = time.monotonic() + self.args.startup_timeout
+            last_progress = time.monotonic()
             while time.monotonic() < deadline:
                 if self.process and self.process.poll() is not None:
-                    raise RuntimeError(f'Server dừng khi khởi động. Xem {self.output / "server.log"}')
+                    tail = (self.output / 'server.log').read_text(encoding='utf-8', errors='replace').splitlines()[-14:]
+                    raise DiagnosticError('server_exited', 'Server dừng trước khi sẵn sàng.', 'Xem server.log; kiểm tra thư viện Python và đường dẫn model.', exit_code=self.process.returncode, log_tail=tail)
                 try:
-                    response = requests.get(self.url + '/health', timeout=2)
-                    response.raise_for_status()
-                    health = response.json()
-                    if health.get('ok'):
-                        print(f'Server sẵn sàng: {self.url}; model_loaded={health.get("model_loaded")}', flush=True)
-                        self.health = health
-                        return self
-                except (requests.RequestException, ValueError):
+                    health = self.probe(self.url)
+                    if health.get('diagnostics_version', 0) < 2:
+                        raise DiagnosticError('server_outdated', 'Server đang chạy là phiên bản cũ.', 'Khởi động lại server mới hoặc bỏ --server-url và dùng --port 0.')
+                    self.health = health
+                    self.report['health'] = health
+                    self.report['server']['active'] = True
+                    self.report.stage('server_ready', f'Server đang chạy tại {self.url}; YOLO={"đã nạp" if health.get("model_loaded") else "chưa nạp"}.')
+                    return self
+                except requests.RequestException:
                     pass
-                time.sleep(0.5)
-            raise TimeoutError('Không nhận được /health sau 90 giây.')
+                if time.monotonic() - last_progress >= 5:
+                    print('Vẫn đang chờ server. Chi tiết khởi động nằm trong server.log.', flush=True)
+                    last_progress = time.monotonic()
+                time.sleep(0.25)
+            raise DiagnosticError('server_timeout', f'Không kết nối được server sau {self.args.startup_timeout:g} giây.', 'Kiểm tra server.log, cổng và --server-url.')
         except BaseException:
             self.__exit__(None, None, None)
             raise
@@ -128,27 +139,32 @@ class Server:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=5)
+        if self.process and 'server' in self.report:
+            self.report['server']['active'] = False
         if self.log:
             self.log.close()
 
     def detect(self, image):
         import requests
 
-        response = requests.post(self.url + '/detect', json={'image': image}, timeout=60)
+        try:
+            response = requests.post(self.url + '/detect', json={'image': image}, timeout=60)
+        except requests.RequestException as error:
+            raise DiagnosticError('detect_connection_failed', 'Không gọi được API /detect.', 'Kiểm tra server.log và trang trạng thái extension.') from error
         try:
             result = response.json()
-        except ValueError as exc:
-            raise RuntimeError(f'/detect trả HTTP {response.status_code}, không phải JSON.') from exc
-        if not response.ok or not result.get('ok'):
-            raise RuntimeError(f'/detect lỗi: {result}')
+        except ValueError as error:
+            raise DiagnosticError('detect_invalid_json', f'/detect trả HTTP {response.status_code}, không phải JSON.') from error
+        if not response.ok or not isinstance(result, dict) or result.get('ok') is not True:
+            raise DiagnosticError('detect_api_error', f'/detect báo lỗi: {result}')
         points = result.get('points')
         if not isinstance(points, list) or any(
             not isinstance(point, dict) or any(
-                not isinstance(point.get(axis), (int, float)) or not math.isfinite(point[axis])
+                isinstance(point.get(axis), bool) or not isinstance(point.get(axis), (int, float)) or not math.isfinite(point[axis])
                 for axis in ('x', 'y')
             ) for point in points
         ):
-            raise RuntimeError('Server trả tọa độ không hợp lệ.')
+            raise DiagnosticError('detect_invalid_points', 'Server trả tọa độ không hợp lệ.')
         return result
 
 
@@ -162,36 +178,48 @@ class ExtensionBrowser:
 
         extension = self.output / 'extension'
         shutil.copytree(ROOT / 'server1/extension', extension)
-        config = {'serverUrl': self.server.url, 'backgroundSelector': self.args.background_selector or ''}
+        config = {'serverUrl': self.server.url, 'mode': 'fixture' if self.args.integration_smoke else 'diagnostics', 'autoDetect': self.args.integration_smoke, 'backgroundSelector': ''}
         (extension / 'config.js').write_text('globalThis.CAPTCHA_SERVER1_CONFIG = ' + json.dumps(config) + ';\n', encoding='utf-8')
         self.playwright = sync_playwright().start()
         try:
+            self.report.stage('browser_starting', 'Mở Chromium với profile chẩn đoán riêng.')
             self.context = self.playwright.chromium.launch_persistent_context(
                 str(self.output / 'browser-profile'), channel='chromium',
                 headless=self.args.integration_smoke, locale='vi-VN',
                 viewport={'width': 1280, 'height': 850},
                 args=[f'--disable-extensions-except={extension}', f'--load-extension={extension}'],
             )
+            self.report.stage('extension_loading', 'Chờ service worker của extension.')
             workers = self.context.service_workers
             worker = workers[0] if workers else self.context.wait_for_event('serviceworker', timeout=20000)
             if not worker.url.startswith('chrome-extension://'):
-                raise RuntimeError('Không thấy service worker của extension server1.')
+                raise DiagnosticError('extension_not_loaded', 'Không thấy service worker của extension server1.')
             extension_id = worker.url.split('/')[2]
             status_page = self.context.pages[0] if self.context.pages else self.context.new_page()
             status_page.goto(f'chrome-extension://{extension_id}/status.html')
-            status_page.locator('#server-state[data-ready="true"]').wait_for(timeout=20000)
+            self.report.stage('extension_connecting', 'Kiểm tra extension gọi được /health.')
+            try:
+                status_page.locator('#server-state[data-ready="true"]').wait_for(timeout=20000)
+            except Exception as error:
+                detail = status_page.locator('#server-state').inner_text(timeout=2000)
+                raise DiagnosticError('extension_connection_failed', detail, 'Kiểm tra trang trạng thái extension và server.log.') from error
             self.report['extension'] = {'loaded': True, 'background_connected': True, 'id': extension_id, 'server_url': self.server.url}
-            print(f'Extension đã nạp và gọi /health thành công: {extension_id}', flush=True)
+            self.report.stage('extension_ready', f'Extension đã nạp và nối server: {extension_id}')
             self.page = self.context.new_page()
             return self
-        except BaseException:
+        except Exception as error:
             self.__exit__(None, None, None)
+            if "Executable doesn't exist" in str(error):
+                raise DiagnosticError('missing_browser', 'Chưa cài Chromium cho Playwright.', f'"{sys.executable}" -m playwright install chromium') from error
             raise
 
     def __exit__(self, *_):
         try:
             if self.context:
-                self.context.close()
+                try:
+                    self.context.close()
+                except Exception as error:
+                    self.report['cleanup_warning'] = type(error).__name__
         finally:
             if self.playwright:
                 self.playwright.stop()
@@ -230,26 +258,6 @@ def first_visible(frame, selector):
         candidate = matches.nth(index)
         if candidate.is_visible():
             return candidate
-    return None
-
-
-def signup_next(page):
-    """Match visible button text even when its accessible name differs."""
-    names = {'tiep theo', 'tiep tuc', 'ke tiep', 'next', 'continue', 'dang ky', 'sign up'}
-    candidates = page.locator('button, [role="button"], input[type="submit"]')
-    for index in range(candidates.count()):
-        candidate = candidates.nth(index)
-        if not candidate.is_visible():
-            continue
-        text = candidate.inner_text() if candidate.evaluate('(el) => el.tagName') != 'INPUT' else candidate.get_attribute('value') or ''
-        normalized = unicodedata.normalize('NFKD', text).casefold().replace('đ', 'd')
-        normalized = ' '.join(''.join(c for c in normalized if not unicodedata.combining(c)).split())
-        if normalized in names:
-            return candidate
-    fallback = page.get_by_text(re.compile(r'^\s*(Tiếp theo|Tiếp tục|Kế tiếp|Next|Continue)\s*$', re.I))
-    for index in range(fallback.count()):
-        if fallback.nth(index).is_visible():
-            return fallback.nth(index)
     return None
 
 
@@ -353,101 +361,6 @@ def otp_visible(page):
     return False
 
 
-def live_test(args, server, output, report, page):
-    from playwright.sync_api import TimeoutError as BrowserTimeout
-
-    report['stage'] = 'open_signup'
-    try:
-        page.goto('https://shopee.vn/buyer/signup', wait_until='commit', timeout=60000)
-    except BrowserTimeout:
-        # A slow subresource must not block an already visible signup form.
-        if page.get_by_placeholder(re.compile(r'Số điện thoại|Phone number', re.I)).count() == 0:
-            raise
-    phone_input = page.get_by_placeholder(re.compile(r'Số điện thoại|Phone number', re.I)).first
-    report['stage'] = 'find_phone_input'
-    phone_input.wait_for(state='visible', timeout=60000)
-    page.locator('#captcha-server1-bridge').wait_for(state='attached', timeout=15000)
-    report['extension']['content_connected'] = True
-    print('Extension đã được gắn vào trang Shopee.', flush=True)
-    print('Nhập số trong hộp thoại trên máy để bắt đầu.', flush=True)
-    report['stage'] = 'await_phone_input'
-    phone = phone_number()
-    try:
-        report['stage'] = 'fill_phone'
-        phone_input.fill(phone)
-        phone_input.press('Tab')
-        report['stage'] = 'click_next'
-        deadline = time.monotonic() + 15
-        next_button = None
-        while time.monotonic() < deadline:
-            next_button = signup_next(page)
-            if next_button is not None:
-                break
-            page.wait_for_timeout(250)
-        if next_button is None:
-            labels = page.locator('button, [role="button"]').all_inner_texts()
-            report['visible_button_texts'] = [re.sub(r'\d{6,}', '[redacted]', label)[:100] for label in labels[:20]]
-            raise RuntimeError('Không tìm thấy nút Tiếp theo/Đăng ký trong giao diện hiện tại.')
-        next_button.click(timeout=15000, no_wait_after=True)
-    finally:
-        phone = None
-    print('Đã bấm Tiếp theo. Đang chờ CAPTCHA...', flush=True)
-    report['signup_submitted'] = True
-    report['stage'] = 'wait_captcha'
-    deadline = time.monotonic() + args.timeout
-    captured = None
-    while time.monotonic() < deadline:
-        if otp_visible(page):
-            report['status'] = 'otp_without_captcha'
-            return
-        captured = extension_result(page)
-        if captured:
-            break
-        page.wait_for_timeout(250)
-    if not captured:
-        raise TimeoutError('Không thấy CAPTCHA trong thời gian chờ. Có thể trang báo lỗi hoặc đổi giao diện.')
-    frame, image, state = captured
-    report['stage'] = 'read_captcha_image'
-    raw, dimensions = read_image(page, image)
-    (output / 'captcha-image.bin').write_bytes(raw)
-    image.screenshot(path=str(output / 'captcha.png'))
-    report['stage'] = 'detect'
-    result = state['result']
-    report['detection_transport'] = 'extension_service_worker'
-    report['detection'] = result
-    report['image_sha256'] = hashlib.sha256(raw).hexdigest()
-    report['image_dimensions'] = dimensions
-    print(f'Server: source={result.get("source")}; points={result["points"]}', flush=True)
-    if len(result['points']) != 1:
-        raise RuntimeError(f'Server trả {len(result["points"])} điểm; chưa xác định được một vị trí kéo duy nhất.')
-    report['stage'] = 'drag'
-    report['drag'] = drag_to_point(page, frame, image, result['points'][0], dimensions, args.handle_selector)
-    page.wait_for_timeout(700)
-    if otp_visible(page):
-        report['status'] = 'captcha_passed_otp_visible'
-        return
-    if args.verify_selector:
-        verify = first_visible(frame, args.verify_selector)
-    else:
-        verify = first_visible(frame, 'button.rb6XLo')
-        if verify is None:
-            for root in frame.locator(CAPTCHA_ROOT).all():
-                buttons = root.get_by_role('button', name=re.compile(r'^(Xác minh|Xác nhận|Verify|Confirm|驗證)$', re.I))
-                if buttons.count() and buttons.first.is_visible():
-                    verify = buttons.first
-                    break
-    report['stage'] = 'verify'
-    if verify is not None:
-        verify.click(timeout=5000)
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        if otp_visible(page):
-            report['status'] = 'captcha_passed_otp_visible'
-            return
-        page.wait_for_timeout(250)
-    report['status'] = 'captcha_still_visible' if find_background(page, args.background_selector) else 'captcha_disappeared_unconfirmed'
-
-
 def smoke_test(server, report):
     import cv2
     import numpy as np
@@ -507,7 +420,7 @@ document.addEventListener('mousemove',e=>{{if(active){{dx=e.clientX-start;knob.s
 document.addEventListener('mouseup',()=>{{if(active){{active=false;if(Math.abs(dx-{target * scale})<2){{document.querySelector('.shopee-captcha').remove();const otp=document.createElement('input');otp.autocomplete='one-time-code';document.body.appendChild(otp)}}}}}});
 </script>'''
         body = f'<iframe width="900" height="700" srcdoc="{html.escape(fixture, quote=True)}"></iframe>' if iframe else fixture
-        url = f'https://shopee.vn/__captcha_server1_fixture_{index}__'
+        url = f'{server.url}/diagnostics/fixture/{index}'
         session.context.route(url, lambda route, request, content=body: route.fulfill(status=200, content_type='text/html', body=content))
         page = session.page
         page.goto(url, wait_until='domcontentloaded')
@@ -533,13 +446,79 @@ document.addEventListener('mouseup',()=>{{if(active){{active=false;if(Math.abs(d
     report['status'] = 'extension_integration_passed'
 
 
+def local_yolo(args, output, report):
+    model_path = Path(args.model).expanduser().resolve()
+    if not model_path.is_file():
+        raise DiagnosticError('model_not_found', f'Không tìm thấy model local: {model_path}', 'Chỉ định --model tới file model đã có trên máy.')
+    if args.image:
+        paths = [Path(args.image).expanduser().resolve()]
+        if not paths[0].is_file():
+            raise DiagnosticError('image_not_found', f'Không tìm thấy ảnh: {paths[0]}')
+    else:
+        directory = Path(args.images_dir).expanduser().resolve()
+        if not directory.is_dir():
+            raise DiagnosticError('images_directory_not_found', f'Không tìm thấy thư mục ảnh: {directory}')
+        paths = sorted(path for path in directory.iterdir() if path.is_file() and path.suffix.lower() in {'.png', '.jpg', '.jpeg', '.webp', '.bmp'})[:args.limit]
+        if not paths:
+            raise DiagnosticError('no_images', 'Thư mục không có ảnh được hỗ trợ.')
+    import cv2
+    import numpy as np
+    from ultralytics import YOLO
+
+    report.stage('model_loading', f'Nạp model local: {model_path.name}')
+    try:
+        model = YOLO(str(model_path))
+    except Exception as error:
+        raise DiagnosticError('model_load_failed', str(error), 'Kiểm tra file model và phiên bản ultralytics/torch.') from error
+    report['local_yolo'] = {'model': str(model_path), 'confidence_threshold': args.conf, 'images': []}
+    for index, path in enumerate(paths):
+        report.stage('local_predicting', f'Kiểm tra ảnh {index + 1}/{len(paths)}: {path.name}')
+        item = {'image': str(path), 'boxes': []}
+        try:
+            raw = path.read_bytes()
+            image = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+            if image is None:
+                raise DiagnosticError('image_decode_failed', 'Không giải mã được ảnh.')
+            result = model(image, conf=args.conf, device='cpu', verbose=False)[0]
+            annotated = image.copy()
+            for box in result.boxes:
+                coords = [float(value) for value in box.xyxy[0].tolist()]
+                class_id = int(box.cls.item())
+                confidence = float(box.conf.item())
+                label = str(result.names[class_id])
+                item['boxes'].append({'xyxy': coords, 'confidence': confidence, 'class_id': class_id, 'class_name': label})
+                x1, y1, x2, y2 = map(int, coords)
+                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 190, 0), 2)
+                cv2.putText(annotated, f'{label} {confidence:.3f}', (max(0, x1), max(15, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 150, 0), 1)
+            destination = output / f'{index + 1:04d}-{path.stem}-prediction.png'
+            ok, encoded = cv2.imencode('.png', annotated)
+            if not ok:
+                raise DiagnosticError('annotation_failed', 'Không xuất được ảnh kết quả.')
+            destination.write_bytes(encoded.tobytes())
+            item.update(sha256=hashlib.sha256(raw).hexdigest(), detection_count=len(item['boxes']), annotated_image=str(destination), status='predicted' if item['boxes'] else 'no_detections')
+        except Exception as error:
+            item.update(status='failed', error_code=getattr(error, 'code', 'prediction_error'), error=str(error))
+        report['local_yolo']['images'].append(item)
+        save_report(output, report)
+    items = report['local_yolo']['images']
+    report['local_yolo']['summary'] = {'tested': len(items), 'with_detections': sum(item['status'] == 'predicted' for item in items), 'without_detections': sum(item['status'] == 'no_detections' for item in items), 'failed': sum(item['status'] == 'failed' for item in items)}
+    report['status'] = 'local_yolo_failed' if any(item['status'] == 'failed' for item in items) else 'local_yolo_completed'
+    report['note'] = 'Kết quả là dự đoán model trên ảnh local, chưa đánh giá độ chính xác bằng nhãn chuẩn.'
+
+
 def record_error(report, error):
-    report.update(status='failed', error_type=type(error).__name__)
+    report.update(status='failed', error_type=type(error).__name__, error_code=getattr(error, 'code', 'unexpected_error'))
     report['error'] = re.sub(r'\d{6,}', '[redacted]', str(error))[:3000]
+    if isinstance(error, DiagnosticError):
+        report['hint'] = error.hint
+        report['error_details'] = error.details
+    report.stage('failed', report['error'])
 
 
 def save_report(output, report):
-    (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+    temporary = output / 'report.json.tmp'
+    temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+    temporary.replace(output / 'report.json')
 
 
 def main():
@@ -547,77 +526,100 @@ def main():
         sys.stdout.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument('--smoke', action='store_true', help='Test API CSV và YOLO, không mở trình duyệt.')
-    modes.add_argument('--integration-smoke', action='store_true', help='Test extension thật và server bằng trang mẫu local, không gửi đăng ký.')
-    modes.add_argument('--setup-only', action='store_true', help='Bật server, nạp extension và mở Shopee để quan sát, không gửi đăng ký.')
-    parser.add_argument('--close-after-test', action='store_true', help='Đóng trình duyệt và server khi test xong; mặc định giữ mở để quan sát.')
-    parser.add_argument('--server-url', help='Dùng server đã chạy, ví dụ http://127.0.0.1:10000.')
-    parser.add_argument('--port', type=int, default=10000, help='Cổng server local, mặc định 10000; dùng 0 để chọn cổng trống.')
-    parser.add_argument('--timeout', type=float, default=60, help='Số giây chờ CAPTCHA.')
-    parser.add_argument('--background-selector', help='CSS selector ảnh nền nếu giao diện đã thay đổi.')
-    parser.add_argument('--handle-selector', help='CSS selector nút kéo nếu giao diện đã thay đổi.')
-    parser.add_argument('--verify-selector', help='CSS selector nút xác minh nếu có.')
+    modes.add_argument('--smoke', action='store_true', help='Test API CSV và YOLO bằng ảnh local.')
+    modes.add_argument('--integration-smoke', action='store_true', help='Test extension và server bằng hai trang mẫu local.')
+    modes.add_argument('--setup-only', action='store_true', help='Mở bảng chẩn đoán kết nối local (chế độ mặc định).')
+    modes.add_argument('--image', help='Chạy YOLO trực tiếp trên một ảnh local; không bật server/trình duyệt.')
+    modes.add_argument('--images-dir', help='Kiểm tra YOLO trên thư mục ảnh local.')
+    parser.add_argument('--limit', type=int, default=12, help='Số ảnh tối đa khi dùng --images-dir; mặc định 12.')
+    parser.add_argument('--model', default=str(ROOT / 'server1/best.pt'), help='File model local.')
+    parser.add_argument('--conf', type=float, default=0.8, help='Ngưỡng tin cậy cho kiểm tra YOLO local.')
+    parser.add_argument('--server-url', help='URL gốc của server1 đang chạy.')
+    parser.add_argument('--port', type=int, default=10000, help='Cổng server; dùng 0 để chọn cổng trống.')
+    parser.add_argument('--startup-timeout', type=float, default=90, help='Số giây tối đa chờ server khởi động.')
+    parser.add_argument('--close-after-test', action='store_true', help='Đóng cửa sổ chẩn đoán và server khi kiểm tra xong.')
     args = parser.parse_args()
-    if args.timeout <= 0 or not 0 <= args.port <= 65535:
-        parser.error('--timeout phải dương; --port nằm trong 0..65535.')
-    if args.server_url and not re.fullmatch(r'https?://[^/?#]+', args.server_url.rstrip('/')):
-        parser.error('--server-url phải là URL gốc của server, không kèm đường dẫn.')
-    required = ['requests'] + ([] if args.server_url else ['flask', 'flask_cors', 'cv2', 'ultralytics'])
-    required += ['cv2', 'numpy'] if args.smoke else ['playwright']
-    if args.integration_smoke:
-        required += ['cv2', 'numpy']
-    missing = sorted({name for name in required if importlib.util.find_spec(name) is None})
-    if missing:
-        print('Thiếu thư viện: ' + ', '.join(missing))
-        print(f'Chạy: "{sys.executable}" -m pip install -r "{ROOT / "server1/requirements.txt"}" playwright')
-        return 2
-    output = ROOT / 'test-results' / datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    if not 0 <= args.port <= 65535 or not math.isfinite(args.startup_timeout) or args.startup_timeout <= 0:
+        parser.error('Cổng phải nằm trong 0..65535; thời gian chờ phải là số dương hữu hạn.')
+    if args.limit < 1 or not math.isfinite(args.conf) or not 0 <= args.conf <= 1:
+        parser.error('--limit phải dương; --conf phải nằm trong 0..1.')
+    if args.server_url:
+        parts = urlsplit(args.server_url)
+        try:
+            parts.port
+        except ValueError:
+            parser.error('Cổng trong --server-url không hợp lệ.')
+        if parts.scheme not in {'http', 'https'} or parts.hostname not in {'127.0.0.1', 'localhost'} or parts.username or parts.password or parts.path not in {'', '/'} or parts.query or parts.fragment:
+            parser.error('--server-url phải là URL gốc của server local, không kèm tài khoản hoặc đường dẫn.')
+    offline = bool(args.image or args.images_dir)
+    mode = 'local_yolo' if offline else 'smoke' if args.smoke else 'extension_integration' if args.integration_smoke else 'diagnostics'
+    output = ROOT / 'test-results' / datetime.now(LOCAL_TZ).strftime('%Y%m%d-%H%M%S-%f')
     output.mkdir(parents=True)
-    mode = 'smoke' if args.smoke else 'extension_integration' if args.integration_smoke else 'setup' if args.setup_only else 'shopee_signup'
-    report = {'mode': mode, 'status': 'started'}
-    code = 1
+    report = RunReport(output, mode)
+    print(f'Báo cáo cập nhật trực tiếp: {output / "report.json"}', flush=True)
     try:
-        with Server(args, output) as server:
-            report['health'] = server.health
-            report['server'] = {'url': server.url, 'managed': server.process is not None, 'pid': server.process.pid if server.process else None}
-            if args.smoke:
-                smoke_test(server, report)
-            else:
-                with ExtensionBrowser(args, server, output, report) as session:
-                    try:
-                        if args.integration_smoke:
-                            integration_smoke(args, server, output, report, session)
-                        elif args.setup_only:
-                            report['status'] = 'environment_ready'
-                            try:
-                                session.page.goto('https://shopee.vn/buyer/signup', wait_until='commit', timeout=60000)
-                                session.page.locator('#captcha-server1-bridge').wait_for(state='attached', timeout=20000)
+        required = ['cv2', 'numpy', 'ultralytics'] if offline else ['requests']
+        if not offline and not args.server_url:
+            required += ['flask', 'flask_cors', 'cv2', 'ultralytics']
+        if not offline and not args.smoke:
+            required.append('playwright')
+        if args.smoke or args.integration_smoke:
+            required += ['cv2', 'numpy']
+        missing = sorted({name for name in required if importlib.util.find_spec(name) is None})
+        if missing:
+            raise DiagnosticError('missing_dependencies', 'Thiếu thư viện: ' + ', '.join(missing), f'"{sys.executable}" -m pip install -r "{ROOT / "server1/requirements.txt"}" playwright')
+        if offline:
+            local_yolo(args, output, report)
+        else:
+            with Server(args, output, report) as server:
+                if args.smoke:
+                    report.stage('api_testing', 'Kiểm tra API bằng ảnh local.')
+                    smoke_test(server, report)
+                else:
+                    with ExtensionBrowser(args, server, output, report) as session:
+                        try:
+                            if args.integration_smoke:
+                                report.stage('integration_testing', 'Kiểm tra extension trên trang mẫu local.')
+                                integration_smoke(args, server, output, report, session)
+                            else:
+                                session.page.goto(server.url + '/diagnostics', wait_until='domcontentloaded', timeout=15000)
+                                session.page.locator('#captcha-server1-bridge').wait_for(state='attached', timeout=15000)
+                                session.page.wait_for_function('JSON.parse(document.getElementById("captcha-server1-bridge").getAttribute("data-state") || "{}").serverReady === true', timeout=15000)
+                                session.page.wait_for_function('document.getElementById("health").dataset.ready === "true"', timeout=15000)
+                                session.page.wait_for_function('document.getElementById("bridge-state").textContent.includes("thành công")', timeout=15000)
                                 report['extension']['content_connected'] = True
-                            except Exception as error:
-                                report['signup_page_warning'] = type(error).__name__
-                        else:
-                            live_test(args, server, output, report, session.page)
-                    except Exception as error:
-                        record_error(report, error)
-                    save_report(output, report)
-                    if not args.integration_smoke and not args.close_after_test:
-                        print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
-                        print(f'Báo cáo: {output / "report.json"}', flush=True)
-                        session.hold()
-        code = 0 if report['status'] in {'server_smoke_passed', 'extension_integration_passed', 'environment_ready', 'captcha_passed_otp_visible'} else 3
+                                session.page.screenshot(path=str(output / 'diagnostics.png'))
+                                report['status'] = 'environment_ready'
+                                report.stage('environment_ready', 'Server và extension đã nối trên trang chẩn đoán local.')
+                        except Exception as error:
+                            record_error(report, error)
+                        save_report(output, report)
+                        if not args.integration_smoke and not args.close_after_test:
+                            print(f'Trạng thái: {report["status"]}. Đóng trình duyệt chẩn đoán để dừng.', flush=True)
+                            session.hold()
     except KeyboardInterrupt:
-        report.update(status='cancelled', error='Đã dừng bằng Ctrl+C.')
-    except Exception as exc:
-        record_error(report, exc)
+        report.update(status='cancelled', error_code='cancelled', error='Đã dừng bằng Ctrl+C.')
+    except Exception as error:
+        record_error(report, error)
     finally:
+        if report['status'] not in {'failed', 'cancelled'}:
+            report.stage('completed', f'Hoàn tất: {report["status"]}.')
+        report['finished_at'] = datetime.now(LOCAL_TZ).isoformat(timespec='seconds')
         save_report(output, report)
-        print(json.dumps(report, ensure_ascii=False, indent=2))
+        print(f'Trạng thái: {report["status"]}', flush=True)
+        if 'error_code' in report:
+            print(f'Mã lỗi: {report["error_code"]}', flush=True)
+        if report.get('hint'):
+            print(f'Gợi ý: {report["hint"]}', flush=True)
+        if 'local_yolo' in report and 'summary' in report['local_yolo']:
+            summary = report['local_yolo']['summary']
+            print(f'Ảnh đã kiểm tra: {summary["tested"]}; có vùng: {summary["with_detections"]}; không có vùng: {summary["without_detections"]}; lỗi: {summary["failed"]}', flush=True)
         print(f'Báo cáo: {output / "report.json"}', flush=True)
-    return code
+    return 0 if report['status'] in {'environment_ready', 'server_smoke_passed', 'extension_integration_passed', 'local_yolo_completed'} else 1
+
 
 
 if __name__ == '__main__':
-    # A double click can use the prepared project venv without changing PATH.
     venv_python = ROOT / '.venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
     if sys.prefix == sys.base_prefix and venv_python.is_file():
         raise SystemExit(subprocess.call([str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]]))

@@ -11,7 +11,8 @@
   label.style.cssText = "position:fixed;bottom:12px;right:12px;z-index:2147483647;background:#263238;color:white;padding:10px 14px;border-radius:7px;font:13px/1.5 sans-serif;max-width:340px;box-shadow:0 2px 12px #0005";
   shadow.appendChild(label);
   if (window === window.top) document.documentElement.appendChild(panel);
-  let state = {status: "connecting", serverReady: false, serverUrl: CAPTCHA_SERVER1_CONFIG.serverUrl};
+  const mode = CAPTCHA_SERVER1_CONFIG.mode || "diagnostics";
+  let state = {status: "connecting", serverReady: false, mode, serverUrl: CAPTCHA_SERVER1_CONFIG.serverUrl};
   let busy = false;
   let lastSignature = "";
   let requestId = 0;
@@ -20,7 +21,7 @@
     bridge.setAttribute("data-state", JSON.stringify(state));
     const messages = {
       connecting: "Extension: đã nạp · Đang nối server…",
-      ready: "Extension: đã nối · Server: đang chạy · Chờ CAPTCHA",
+      ready: mode === "fixture" ? "Trang mẫu local: sẵn sàng kiểm tra ảnh" : "Chẩn đoán kết nối: đã nối · Không chạy nhận diện ảnh",
       detecting: "Server đang xử lý ảnh CAPTCHA…",
       detected: `Server đã trả ${state.result?.points?.length || 0} điểm (${state.result?.source || "detect"})`,
       error: `Kết nối/test lỗi: ${state.error || "không rõ"}`
@@ -33,10 +34,10 @@
   async function health() {
     try {
       const response = await chrome.runtime.sendMessage({action: "server1_health"});
-      if (!response?.ok) throw new Error(response?.error || "Không nhận được phản hồi server");
-      publish({serverReady: true, health: response.data, ...(state.status === "connecting" || !state.serverReady ? {status: "ready", error: null} : {})});
+      if (!response?.ok) throw Object.assign(new Error(response?.error || "Không nhận được phản hồi server"), {code: response?.code});
+      publish({serverReady: true, health: response.data, lastHealthAt: new Date().toISOString(), ...(state.status === "connecting" || !state.serverReady ? {status: "ready", error: null, errorCode: null} : {})});
     } catch (error) {
-      publish({status: "error", serverReady: false, error: error.message});
+      publish({status: "error", serverReady: false, errorCode: error.code || "connection_failed", error: error.message});
     }
   }
   function visible(element) {
@@ -68,6 +69,7 @@
     });
   }
   async function inspect() {
+    if (!CAPTCHA_SERVER1_CONFIG.autoDetect) return;
     if (busy || !state.serverReady) return;
     const image = background();
     if (!image) return;

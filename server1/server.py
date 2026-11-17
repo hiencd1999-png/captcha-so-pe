@@ -37,11 +37,15 @@ OFFSET_Y_DEFAULT = float(os.environ.get("YOLO_OFFSET_Y", -21))
 # --- Initialization ---
 os.makedirs(DATASET_DIR, exist_ok=True)
 print(f"[Server] Loading YOLO model from {MODEL_PATH}...")
+model_error = None
 try:
+    if not os.path.isfile(MODEL_PATH):
+        raise FileNotFoundError(f"Model local not found: {MODEL_PATH}")
     model = YOLO(MODEL_PATH)
 except Exception as e:
     print(f"[Error] Failed to load YOLO model: {e}")
     model = None
+    model_error = f"{type(e).__name__}: {e}"
 
 # --- Helpers ---
 
@@ -137,10 +141,44 @@ def health():
     return jsonify({
         "ok": True,
         "service": "captcha-so-pe-server1",
+        "diagnostics_version": 2,
         "model_loaded": model is not None,
+        "model_error": model_error,
         "using_labels_only": model is None,
         "labels_url": LABELS_URL
     })
+
+
+@app.route("/diagnostics", methods=["GET"])
+def diagnostics():
+    return """<!doctype html><html lang="vi"><meta charset="utf-8">
+<title>Chẩn đoán server local</title><style>
+body{font:16px/1.6 system-ui;margin:40px;max-width:850px;color:#203040}
+pre{background:#eef2f6;border-radius:8px;padding:18px;white-space:pre-wrap}
+</style><h1>Chẩn đoán server và extension</h1>
+<p>Chế độ hiện tại: kiểm tra kết nối local. Không chạy nhận diện ảnh trên trang.</p>
+<pre id="health" data-ready="false">Đang kiểm tra server…</pre>
+<p id="bridge-state">Đang chờ content script của extension…</p>
+<p>Ảnh local: <code>python test_shopee.py --image đường_dẫn_ảnh.png</code></p>
+<p>Trang mẫu: <code>python test_shopee.py --integration-smoke --port 0</code></p>
+<script>
+async function refresh(){
+  const health=document.getElementById('health');
+  try{
+    const response=await fetch('/health');if(!response.ok)throw new Error('HTTP '+response.status);
+    const data=await response.json();
+    if(!data.ok || data.service!=='captcha-so-pe-server1')throw new Error('Sai dịch vụ server1');
+    health.dataset.ready='true';
+    health.textContent='Server: đang chạy\\nModel YOLO: '+(data.model_loaded?'đã nạp':'chưa nạp')+'\\n'+(data.model_error||'');
+  }catch(error){health.dataset.ready='false';health.textContent='Server không phản hồi: '+error.message}
+  const bridge=document.getElementById('captcha-server1-bridge');
+  const text=document.getElementById('bridge-state');
+  if(bridge){try{const state=JSON.parse(bridge.getAttribute('data-state')||'{}');
+    text.textContent='Extension: đã nạp · Kết nối API: '+(state.serverReady?'thành công':'chưa nối')+(state.error?' · '+state.error:'');
+  }catch(error){text.textContent='Không đọc được trạng thái extension'}}
+}
+refresh();setInterval(refresh,2000);
+</script></html>"""
 
 @app.route("/api/captures", methods=["GET"])
 def list_captures():
