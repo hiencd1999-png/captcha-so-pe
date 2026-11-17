@@ -56,16 +56,31 @@ URL server của extension nằm trong `content.js`, quyền truy cập nằm tr
 
 ## Chạy thử bằng một file Python
 
-`test_shopee.py` khởi động server Python, mở Chromium, hỏi số điện thoại bằng
-hộp thoại trên máy, điền form đăng ký Shopee Việt Nam và bấm Tiếp theo một lần.
-Khi thấy CAPTCHA, script gửi ảnh gốc cho `/detect`, quy đổi tọa độ theo kích
-thước hiển thị và thử kéo một lần. Script kết thúc ở bước OTP; không nhập OTP
-hoặc hoàn tất tài khoản.
+`test_shopee.py` khởi động server Python tại `http://127.0.0.1:10000`, chờ
+`/health` thành công rồi nạp `server1/extension` vào profile Chromium riêng.
+Trang kiểm tra kết nối hiển thị trạng thái extension, server và model. Chỉ
+sau khi extension gọi được server, script mới mở trang đăng ký Shopee.
+
+Script hỏi số điện thoại bằng hộp thoại trên máy, điền form và bấm Tiếp theo
+một lần. Extension gửi ảnh CAPTCHA gốc đến `/detect`; Python quy đổi tọa độ
+và thực hiện kéo chuột. Script kiểm tra bước OTP, không nhập OTP hoặc hoàn
+tất tài khoản. Nhãn xanh ở góc trang cho biết extension đã nối server.
 
 ```powershell
 python -m pip install -r server1/requirements.txt playwright
 python -m playwright install chromium
 python test_shopee.py
+```
+
+Mặc định trình duyệt và server được giữ mở cả khi test kết thúc hoặc báo lỗi
+để quan sát. Đóng cửa sổ trình duyệt test để dừng server do script khởi động.
+Dùng `--close-after-test` nếu muốn tự đóng ngay. Nếu có server1 đã chạy trên
+cổng 10000, script xác minh và sử dụng lại; không dừng server đó khi kết thúc.
+
+Chỉ bật server, nạp extension và mở Shopee, không tự gửi đăng ký:
+
+```powershell
+python test_shopee.py --setup-only
 ```
 
 Nếu có `.venv` tại gốc dự án, script tự chạy lại bằng Python trong môi trường
@@ -75,12 +90,27 @@ Nếu có `.venv` tại gốc dự án, script tự chạy lại bằng Python t
 python test_shopee.py --smoke
 ```
 
+Kiểm tra extension thật đã nạp, content script, service worker, API `/detect`
+và kéo chuột trên hai trang mẫu (ảnh gốc và ảnh thu nhỏ trong iframe):
+
+```powershell
+python test_shopee.py --integration-smoke
+```
+
+Chế độ này chặn yêu cầu đến URL trang mẫu và trả HTML local, không gửi đăng
+ký lên Shopee. Nó xác minh kết nối extension/server và thao tác kéo trên mẫu,
+chưa xác minh giải được CAPTCHA của Shopee thật.
+
 Ảnh CAPTCHA, log server và `report.json` nằm trong `test-results/` và được
-loại khỏi Git. Báo cáo không lưu số điện thoại. Mỗi lần chạy tự chọn cổng
-server trống và dừng server do chính script mở khi kết thúc. Có thể dùng
+loại khỏi Git, cùng profile trình duyệt và bản extension được cấu hình cho
+lần chạy. Báo cáo không lưu số điện thoại. Dùng `--port 0` để tự chọn cổng
+trống; extension được cấu hình theo đúng cổng đó. Có thể dùng
 `--server-url http://127.0.0.1:10000` để kiểm tra server đã chạy.
 
 `server_smoke_passed` chỉ xác nhận API tra CSV và suy luận YOLO hoạt động.
+`extension_integration_passed` xác nhận extension và thao tác kéo qua hai
+trang mẫu local. `environment_ready` xác nhận môi trường trình duyệt/server
+đã mở ở chế độ `--setup-only`.
 `captcha_passed_otp_visible` xác nhận đã nhìn thấy bước OTP sau lần thử kéo;
 `captcha_disappeared_unconfirmed` chưa đủ để kết luận vượt CAPTCHA. Shopee có
 thể đổi giao diện hoặc hiện loại CAPTCHA khác; khi đó cần chỉ định

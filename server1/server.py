@@ -136,8 +136,10 @@ def write_label(img_id, slider_x):
 def health():
     return jsonify({
         "ok": True,
+        "service": "captcha-so-pe-server1",
         "model_loaded": model is not None,
-        "using_labels_only": True
+        "using_labels_only": model is None,
+        "labels_url": LABELS_URL
     })
 
 @app.route("/api/captures", methods=["GET"])
