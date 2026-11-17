@@ -20,6 +20,7 @@ import socket
 import subprocess
 import sys
 import time
+import unicodedata
 from datetime import datetime
 from urllib.parse import unquote_to_bytes
 
@@ -140,6 +141,26 @@ def first_visible(frame, selector):
         candidate = matches.nth(index)
         if candidate.is_visible():
             return candidate
+    return None
+
+
+def signup_next(page):
+    """Match visible button text even when its accessible name differs."""
+    names = {'tiep theo', 'tiep tuc', 'ke tiep', 'next', 'continue', 'dang ky', 'sign up'}
+    candidates = page.locator('button, [role="button"], input[type="submit"]')
+    for index in range(candidates.count()):
+        candidate = candidates.nth(index)
+        if not candidate.is_visible():
+            continue
+        text = candidate.inner_text() if candidate.evaluate('(el) => el.tagName') != 'INPUT' else candidate.get_attribute('value') or ''
+        normalized = unicodedata.normalize('NFKD', text).casefold().replace('đ', 'd')
+        normalized = ' '.join(''.join(c for c in normalized if not unicodedata.combining(c)).split())
+        if normalized in names:
+            return candidate
+    fallback = page.get_by_text(re.compile(r'^\s*(Tiếp theo|Tiếp tục|Kế tiếp|Next|Continue)\s*$', re.I))
+    for index in range(fallback.count()):
+        if fallback.nth(index).is_visible():
+            return fallback.nth(index)
     return None
 
 
@@ -268,7 +289,18 @@ def live_test(args, server, output, report):
                 phone_input.fill(phone)
                 phone_input.press('Tab')
                 report['stage'] = 'click_next'
-                page.get_by_role('button', name=re.compile(r'^(Tiếp theo|Next)$', re.I)).first.click(timeout=15000)
+                deadline = time.monotonic() + 15
+                next_button = None
+                while time.monotonic() < deadline:
+                    next_button = signup_next(page)
+                    if next_button is not None:
+                        break
+                    page.wait_for_timeout(250)
+                if next_button is None:
+                    labels = page.locator('button, [role="button"]').all_inner_texts()
+                    report['visible_button_texts'] = [re.sub(r'\d{6,}', '[redacted]', label)[:100] for label in labels[:20]]
+                    raise RuntimeError('Không tìm thấy nút Tiếp theo/Đăng ký trong giao diện hiện tại.')
+                next_button.click(timeout=15000, no_wait_after=True)
             finally:
                 phone = None
             print('Đã bấm Tiếp theo. Đang chờ CAPTCHA...', flush=True)
