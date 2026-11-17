@@ -53,3 +53,36 @@ tên dạng `left_top.png`, chạy trên cổng `5000`. Extension trong
 `source2/extension` gọi API `/solve` của bản này; chưa nối với `server1`.
 URL server của extension nằm trong `content.js`, quyền truy cập nằm trong
 `manifest.json` và cần khớp với địa chỉ server sử dụng.
+
+## Chạy thử bằng một file Python
+
+`test_shopee.py` khởi động server Python, mở Chromium, hỏi số điện thoại bằng
+hộp thoại trên máy, điền form đăng ký Shopee Việt Nam và bấm Tiếp theo một lần.
+Khi thấy CAPTCHA, script gửi ảnh gốc cho `/detect`, quy đổi tọa độ theo kích
+thước hiển thị và thử kéo một lần. Script kết thúc ở bước OTP; không nhập OTP
+hoặc hoàn tất tài khoản.
+
+```powershell
+python -m pip install -r server1/requirements.txt playwright
+python -m playwright install chromium
+python test_shopee.py
+```
+
+Nếu có `.venv` tại gốc dự án, script tự chạy lại bằng Python trong môi trường
+đó. Test API bằng ảnh local, không cần số điện thoại hoặc gửi đăng ký:
+
+```powershell
+python test_shopee.py --smoke
+```
+
+Ảnh CAPTCHA, log server và `report.json` nằm trong `test-results/` và được
+loại khỏi Git. Báo cáo không lưu số điện thoại. Mỗi lần chạy tự chọn cổng
+server trống và dừng server do chính script mở khi kết thúc. Có thể dùng
+`--server-url http://127.0.0.1:10000` để kiểm tra server đã chạy.
+
+`server_smoke_passed` chỉ xác nhận API tra CSV và suy luận YOLO hoạt động.
+`captcha_passed_otp_visible` xác nhận đã nhìn thấy bước OTP sau lần thử kéo;
+`captcha_disappeared_unconfirmed` chưa đủ để kết luận vượt CAPTCHA. Shopee có
+thể đổi giao diện hoặc hiện loại CAPTCHA khác; khi đó cần chỉ định
+`--background-selector`, `--handle-selector`, `--verify-selector` theo giao
+diện thực tế. Chạy `python test_shopee.py --help` để xem các tùy chọn.

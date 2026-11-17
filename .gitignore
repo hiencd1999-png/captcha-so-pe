@@ -10,3 +10,4 @@ node_modules/
 *.rar
 .DS_Store
 Thumbs.db
+test-results/
