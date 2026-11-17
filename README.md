@@ -60,15 +60,34 @@ Chạy từ thư mục gốc dự án:
 
 ```powershell
 python -m pip install -r server1/requirements.txt playwright
-python -m playwright install chromium
 python test_shopee.py
 ```
 
 Lệnh mặc định mở bảng chẩn đoán **local**, khởi động server1, xác minh
-`/health`, nạp extension vào profile Chromium riêng và kiểm tra content
+`/health`, nạp extension vào profile Microsoft Edge riêng và kiểm tra content
 script trên `/diagnostics`. Trang hiển thị riêng trạng thái server, model
 và extension. Chế độ này không gửi đăng ký và không chạy nhận diện ảnh trên
 trang. Tùy chọn `--setup-only` tương đương chế độ mặc định.
+
+Mặc định sử dụng **Microsoft Edge đã cài trên máy**, tự tìm `msedge.exe`
+trong các thư mục cài đặt Windows và `PATH`. Có thể chỉ định vị trí:
+
+```powershell
+python test_shopee.py --edge-path "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+```
+
+Không cần tải Chromium để dùng Edge. Profile chẩn đoán nằm trong thư mục
+kết quả của lần chạy, tách với profile Edge cá nhân. Báo cáo ghi tên trình
+duyệt, đường dẫn thực thi và phiên bản đã chạy. Để kiểm thử local bằng
+Chromium thay vì Edge:
+
+```powershell
+python -m playwright install chromium
+python test_shopee.py --browser chromium
+```
+
+Khả năng nạp extension phụ thuộc bản trình duyệt đang cài; nếu không nạp
+được, tool báo `extension_not_loaded` thay vì báo kết nối thành công.
 
 Trình duyệt và server được giữ mở để quan sát. Đóng cửa sổ chẩn đoán để dừng
 server do script mở; server có sẵn được giữ nguyên. Dùng `--close-after-test`
@@ -87,6 +106,7 @@ Lỗi có `error_code`, `error`, `hint` và chi tiết liên quan. Các lỗi ch
 - `server_exited` / `server_timeout`: server dừng hoặc quá thời gian chờ.
 - `health_invalid_json`: địa chỉ server không trả dữ liệu JSON hợp lệ.
 - `missing_browser`: thiếu Chromium cho Playwright.
+- `edge_not_found`: không tìm thấy Edge hoặc đường dẫn chỉ định không đúng.
 - `extension_connection_failed`: extension chưa nối được API server.
 
 Dùng `--startup-timeout 30` để thay đổi thời gian chờ khởi động.

@@ -168,6 +168,26 @@ class Server:
         return result
 
 
+def resolve_edge_path(override=None):
+    if override:
+        path = Path(override).expanduser().resolve()
+        if not path.is_file():
+            raise DiagnosticError('edge_not_found', f'Không tìm thấy Edge: {path}', 'Kiểm tra --edge-path.')
+        return path
+    candidates = [
+        Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Microsoft/Edge/Application/msedge.exe',
+        Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)')) / 'Microsoft/Edge/Application/msedge.exe',
+        Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData/Local')) / 'Microsoft/Edge/Application/msedge.exe',
+    ]
+    found = shutil.which('msedge.exe')
+    if found:
+        candidates.append(Path(found))
+    for path in candidates:
+        if path.is_file():
+            return path.resolve()
+    raise DiagnosticError('edge_not_found', 'Không tìm thấy Microsoft Edge đã cài trên máy.', 'Chỉ định --edge-path tới msedge.exe; hoặc dùng --browser chromium cho kiểm thử local.')
+
+
 class ExtensionBrowser:
     def __init__(self, args, server, output, report):
         self.args, self.server, self.output, self.report = args, server, output, report
@@ -182,16 +202,27 @@ class ExtensionBrowser:
         (extension / 'config.js').write_text('globalThis.CAPTCHA_SERVER1_CONFIG = ' + json.dumps(config) + ';\n', encoding='utf-8')
         self.playwright = sync_playwright().start()
         try:
-            self.report.stage('browser_starting', 'Mở Chromium với profile chẩn đoán riêng.')
+            options = {'channel': 'chromium'}
+            if self.args.browser == 'edge':
+                edge_path = resolve_edge_path(self.args.edge_path)
+                options = {'channel': 'msedge', 'executable_path': str(edge_path)}
+                self.report['browser'] = {'name': 'edge', 'executable': str(edge_path)}
+            else:
+                self.report['browser'] = {'name': 'chromium'}
+            self.report.stage('browser_starting', f'Mở {self.args.browser} với profile chẩn đoán riêng.')
             self.context = self.playwright.chromium.launch_persistent_context(
-                str(self.output / 'browser-profile'), channel='chromium',
+                str(self.output / 'browser-profile'), **options,
                 headless=self.args.integration_smoke, locale='vi-VN',
                 viewport={'width': 1280, 'height': 850},
                 args=[f'--disable-extensions-except={extension}', f'--load-extension={extension}'],
             )
+            self.report['browser']['version'] = self.context.browser.version
             self.report.stage('extension_loading', 'Chờ service worker của extension.')
             workers = self.context.service_workers
-            worker = workers[0] if workers else self.context.wait_for_event('serviceworker', timeout=20000)
+            try:
+                worker = workers[0] if workers else self.context.wait_for_event('serviceworker', timeout=10000)
+            except Exception as error:
+                raise DiagnosticError('extension_not_loaded', f'{self.args.browser} đã mở nhưng chưa nạp được extension.', 'Kiểm tra khả năng nạp extension của bản Edge này; dùng --browser chromium để chạy kiểm thử extension local.') from error
             if not worker.url.startswith('chrome-extension://'):
                 raise DiagnosticError('extension_not_loaded', 'Không thấy service worker của extension server1.')
             extension_id = worker.url.split('/')[2]
@@ -210,6 +241,8 @@ class ExtensionBrowser:
         except Exception as error:
             self.__exit__(None, None, None)
             if "Executable doesn't exist" in str(error):
+                if self.args.browser == 'edge':
+                    raise DiagnosticError('edge_not_found', 'Không khởi động được Edge đã cài trên máy.', 'Kiểm tra --edge-path và quyền chạy msedge.exe.') from error
                 raise DiagnosticError('missing_browser', 'Chưa cài Chromium cho Playwright.', f'"{sys.executable}" -m playwright install chromium') from error
             raise
 
@@ -535,6 +568,8 @@ def main():
     parser.add_argument('--model', default=str(ROOT / 'server1/best.pt'), help='File model local.')
     parser.add_argument('--conf', type=float, default=0.8, help='Ngưỡng tin cậy cho kiểm tra YOLO local.')
     parser.add_argument('--server-url', help='URL gốc của server1 đang chạy.')
+    parser.add_argument('--browser', choices=['edge', 'chromium'], default='edge', help='Trình duyệt chẩn đoán, mặc định là Edge đã cài trên máy.')
+    parser.add_argument('--edge-path', help='Đường dẫn msedge.exe nếu cần chỉ định vị trí Edge.')
     parser.add_argument('--port', type=int, default=10000, help='Cổng server; dùng 0 để chọn cổng trống.')
     parser.add_argument('--startup-timeout', type=float, default=90, help='Số giây tối đa chờ server khởi động.')
     parser.add_argument('--close-after-test', action='store_true', help='Đóng cửa sổ chẩn đoán và server khi kiểm tra xong.')

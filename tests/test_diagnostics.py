@@ -87,6 +87,16 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(saved['stage'], 'server_waiting')
         self.assertTrue(saved['updated_at'].endswith('+07:00'))
 
+    def test_explicit_edge_path_is_resolved(self):
+        executable = self.output / 'msedge.exe'
+        executable.write_bytes(b'fixture')
+        self.assertEqual(runner.resolve_edge_path(str(executable)), executable.resolve())
+
+    def test_missing_edge_path_has_specific_error(self):
+        with self.assertRaises(runner.DiagnosticError) as failure:
+            runner.resolve_edge_path(str(self.output / 'missing-msedge.exe'))
+        self.assertEqual(failure.exception.code, 'edge_not_found')
+
 
 if __name__ == '__main__':
     unittest.main()
